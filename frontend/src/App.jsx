@@ -3,10 +3,11 @@ import { LogOut, Plus, Trash2, Edit, X, Target, AlertTriangle, TrendingUp, Loade
 
 // Configuration - Update these values directly
 const CONFIG = {
-  API_URL: 'http://localhost:5000',
-  GITHUB_CLIENT_ID: 'Ov23linVs5BQek63QtJ4',
+  API_URL: process.env.REACT_APP_API_URL,
+  GITHUB_CLIENT_ID: process.env.REACT_APP_GITHUB_CLIENT_ID,
   MAX_REPOS: 5
 };
+
 
 const SecureSession = {
   set: (sessionId, user) => {
