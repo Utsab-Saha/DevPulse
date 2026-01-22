@@ -1,4 +1,4 @@
-// DevPulse - Production Backend
+// DevPulse - Secure Backend with Gist Storage & Token Encryption
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
@@ -6,53 +6,67 @@ require('dotenv').config();
 
 const app = express();
 
-// CORS Configuration
-const ALLOWED_ORIGINS = [
+// IMPORTANT: Configure CORS properly for both local and production
+const allowedOrigins = [
   'http://localhost:3000',
-  'https://devpulse-ochre.vercel.app',
-  process.env.FRONTEND_URL
-].filter(Boolean);
+  'http://localhost:5173',
+  'https://devpulse-blush.vercel.app'
+];
+
+// Add FRONTEND_URL from env if it exists and isn't already in the list
+if (process.env.FRONTEND_URL && !allowedOrigins.includes(process.env.FRONTEND_URL)) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
+}
 
 app.use(cors({
-  origin: function(origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, etc)
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
-    if (ALLOWED_ORIGINS.includes(origin)) {
+    if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      console.log('❌ Blocked origin:', origin);
+      console.warn(`⚠️  CORS blocked request from origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  optionsSuccessStatus: 200
 }));
 
 app.use(express.json());
 
+// entry port for backend
 const PORT = process.env.PORT || 5000;
+ 
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
-
+// Generate or use provided encryption key (must be 64 hex chars = 32 bytes)
 let ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 if (!ENCRYPTION_KEY) {
   ENCRYPTION_KEY = crypto.randomBytes(32).toString('hex');
-  console.log('⚠️  Generated encryption key. Add to .env:');
+  console.log('⚠️  Generated new encryption key. Add to .env to persist:');
   console.log(`ENCRYPTION_KEY=${ENCRYPTION_KEY}\n`);
 } else if (ENCRYPTION_KEY.length !== 64) {
-  console.error('❌ ENCRYPTION_KEY must be 64 hex chars!');
+  console.error('❌ ERROR: ENCRYPTION_KEY must be exactly 64 hex characters!');
+  console.log('Generate a valid key with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
   process.exit(1);
+ 
 }
 
+// Validate environment variables
 if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
-  console.error('\n❌ Missing GitHub OAuth credentials!\n');
+  console.error('\n❌ ERROR: Missing GitHub OAuth credentials!');
+  console.error('Please set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in your .env file\n');
   process.exit(1);
 }
 
+// In-memory secure token storage (server-side only)
 const tokenStore = new Map();
 
+// Encryption helpers
 function encrypt(text) {
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY, 'hex'), iv);
@@ -71,29 +85,21 @@ function decrypt(text) {
   return decrypted.toString();
 }
 
+// Generate secure session ID
 function generateSessionId() {
   return crypto.randomBytes(32).toString('hex');
-}
-
-function getAccessToken(sessionId) {
-  const session = tokenStore.get(sessionId);
-  if (!session) throw new Error('Invalid or expired session');
-  if (session.expiresAt < Date.now()) {
-    tokenStore.delete(sessionId);
-    throw new Error('Session expired');
-  }
-  return decrypt(session.accessToken);
 }
 
 // GitHub OAuth
 app.post('/api/auth/github', async (req, res) => {
   try {
     const { code } = req.body;
+    
     if (!code) {
       return res.status(400).json({ success: false, error: 'OAuth code required' });
     }
     
-    console.log('📝 OAuth code received');
+    console.log('📝 Received OAuth code, exchanging for token...');
     
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
@@ -111,13 +117,16 @@ app.post('/api/auth/github', async (req, res) => {
     const tokenData = await tokenResponse.json();
     
     if (tokenData.error) {
-      console.error('❌ GitHub auth failed:', tokenData.error_description);
+      console.error('❌ GitHub token exchange failed:', tokenData.error_description);
       return res.status(400).json({ 
         success: false, 
         error: tokenData.error_description || 'GitHub auth failed' 
       });
     }
 
+    console.log('✓ Token received, fetching user data...');
+
+    // Get user info - Use token instead of Bearer for GitHub
     const userResponse = await fetch('https://api.github.com/user', {
       headers: {
         'Authorization': `token ${tokenData.access_token}`,
@@ -127,28 +136,33 @@ app.post('/api/auth/github', async (req, res) => {
     });
 
     if (!userResponse.ok) {
-      console.error('❌ Failed to fetch user');
+      console.error('❌ Failed to fetch user data:', userResponse.status);
+      const errorText = await userResponse.text();
+      console.error('GitHub API response:', errorText);
       return res.status(401).json({ 
         success: false, 
-        error: 'Failed to fetch user from GitHub' 
+        error: 'Failed to fetch user information from GitHub' 
       });
     }
 
     const userData = await userResponse.json();
+
+    // Generate secure session ID
     const sessionId = generateSessionId();
     
+    // Store encrypted token server-side (in-memory)
     tokenStore.set(sessionId, {
       accessToken: encrypt(tokenData.access_token),
       userId: userData.id,
       login: userData.login,
-      expiresAt: Date.now() + (24 * 60 * 60 * 1000)
+      expiresAt: Date.now() + (24 * 60 * 60 * 1000) // 24 hours
     });
 
-    console.log(`✓ ${userData.login} authenticated`);
+    console.log(`✓ User authenticated: ${userData.login} (Session: ${sessionId.substring(0, 8)}...)`);
 
     res.json({
       success: true,
-      sessionId,
+      sessionId, // Only session ID sent to client
       user: {
         id: userData.id,
         login: userData.login,
@@ -159,20 +173,38 @@ app.post('/api/auth/github', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Auth error:', error.message);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
   }
 });
 
+// Logout (destroy session)
 app.post('/api/auth/logout', (req, res) => {
   const { sessionId } = req.body;
   if (sessionId && tokenStore.has(sessionId)) {
     const session = tokenStore.get(sessionId);
-    console.log(`✓ ${session.login} logged out`);
+    console.log(`✓ User logged out: ${session.login}`);
     tokenStore.delete(sessionId);
   }
   res.json({ success: true });
 });
 
+// Middleware: Get access token from session
+function getAccessToken(sessionId) {
+  const session = tokenStore.get(sessionId);
+  if (!session) {
+    throw new Error('Invalid or expired session');
+  }
+  if (session.expiresAt < Date.now()) {
+    tokenStore.delete(sessionId);
+    throw new Error('Session expired');
+  }
+  return decrypt(session.accessToken);
+}
+
+// Check repository access
 app.post('/api/repo/check-access', async (req, res) => {
   try {
     const { owner, repo, sessionId, username } = req.body;
@@ -187,10 +219,12 @@ app.post('/api/repo/check-access', async (req, res) => {
     });
 
     if (repoResponse.status === 404) {
-      return res.json({ hasAccess: false, isAdmin: false });
+      return res.json({ hasAccess: false, isAdmin: false, message: 'Repository not found or no access' });
     }
 
     const repoData = await repoResponse.json();
+
+    // Check if user is admin
     const permResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}/collaborators/${username}/permission`, {
       headers: {
         'Authorization': `token ${accessToken}`,
@@ -214,19 +248,24 @@ app.post('/api/repo/check-access', async (req, res) => {
       }
     });
   } catch (error) {
+    console.error('❌ Repo access check error:', error.message);
     res.status(401).json({ error: error.message });
   }
 });
 
+// Create/Update shared data storage (GitHub Gist)
 app.post('/api/storage/save', async (req, res) => {
   try {
     const { sessionId, repoFullName, data, dataType } = req.body;
     const accessToken = getAccessToken(sessionId);
     const session = tokenStore.get(sessionId);
 
+    // Encrypt sensitive data
     const encryptedData = encrypt(JSON.stringify(data));
+
     const gistFilename = `devpulse_${repoFullName.replace('/', '_')}_${dataType}.json`;
     
+    // Check if gist exists
     const gistsResponse = await fetch('https://api.github.com/gists', {
       headers: {
         'Authorization': `token ${accessToken}`,
@@ -239,7 +278,7 @@ app.post('/api/storage/save', async (req, res) => {
     const existingGist = gists.find(g => g.files[gistFilename]);
 
     const gistData = {
-      description: `DevPulse: ${repoFullName} (${dataType})`,
+      description: `DevPulse data for ${repoFullName} (${dataType})`,
       public: false,
       files: {
         [gistFilename]: {
@@ -257,6 +296,7 @@ app.post('/api/storage/save', async (req, res) => {
 
     let result;
     if (existingGist) {
+      // Update existing gist
       const updateResponse = await fetch(`https://api.github.com/gists/${existingGist.id}`, {
         method: 'PATCH',
         headers: {
@@ -268,7 +308,9 @@ app.post('/api/storage/save', async (req, res) => {
         body: JSON.stringify(gistData)
       });
       result = await updateResponse.json();
+      console.log(`✓ Updated gist for ${repoFullName} (${dataType})`);
     } else {
+      // Create new gist
       const createResponse = await fetch('https://api.github.com/gists', {
         method: 'POST',
         headers: {
@@ -280,18 +322,84 @@ app.post('/api/storage/save', async (req, res) => {
         body: JSON.stringify(gistData)
       });
       result = await createResponse.json();
+      console.log(`✓ Created gist for ${repoFullName} (${dataType})`);
     }
 
-    res.json({ success: true, gistId: result.id, url: result.html_url });
+    res.json({
+      success: true,
+      gistId: result.id,
+      url: result.html_url
+    });
+
   } catch (error) {
+    console.error('❌ Storage save error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
+// Load shared data from Gist
 app.post('/api/storage/load', async (req, res) => {
   try {
     const { sessionId, repoFullName, dataType } = req.body;
     const accessToken = getAccessToken(sessionId);
+
+    const gistFilename = `devpulse_${repoFullName.replace('/', '_')}_${dataType}.json`;
+
+    // Get all gists
+    const gistsResponse = await fetch('https://api.github.com/gists', {
+      headers: {
+        'Authorization': `token ${accessToken}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'DevPulse-App'
+      }
+    });
+
+    const gists = await gistsResponse.json();
+    const targetGist = gists.find(g => g.files[gistFilename]);
+
+    if (!targetGist) {
+      return res.json({ success: true, data: null, message: 'No data found' });
+    }
+
+    // Get gist content
+    const gistResponse = await fetch(`https://api.github.com/gists/${targetGist.id}`, {
+      headers: {
+        'Authorization': `token ${accessToken}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'DevPulse-App'
+      }
+    });
+
+    const gistData = await gistResponse.json();
+    const fileContent = JSON.parse(gistData.files[gistFilename].content);
+
+    // Decrypt data
+    const decryptedData = JSON.parse(decrypt(fileContent.data));
+
+    console.log(`✓ Loaded gist for ${repoFullName} (${dataType})`);
+
+    res.json({
+      success: true,
+      data: decryptedData,
+      metadata: {
+        updatedAt: fileContent.updatedAt,
+        updatedBy: fileContent.updatedBy,
+        gistUrl: gistData.html_url
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Storage load error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get audit log from Gist history
+app.post('/api/storage/audit-log', async (req, res) => {
+  try {
+    const { sessionId, repoFullName, dataType } = req.body;
+    const accessToken = getAccessToken(sessionId);
+
     const gistFilename = `devpulse_${repoFullName.replace('/', '_')}_${dataType}.json`;
 
     const gistsResponse = await fetch('https://api.github.com/gists', {
@@ -306,10 +414,11 @@ app.post('/api/storage/load', async (req, res) => {
     const targetGist = gists.find(g => g.files[gistFilename]);
 
     if (!targetGist) {
-      return res.json({ success: true, data: null });
+      return res.json({ success: true, history: [] });
     }
 
-    const gistResponse = await fetch(`https://api.github.com/gists/${targetGist.id}`, {
+    // Get gist commits (history)
+    const historyResponse = await fetch(`https://api.github.com/gists/${targetGist.id}/commits`, {
       headers: {
         'Authorization': `token ${accessToken}`,
         'Accept': 'application/vnd.github.v3+json',
@@ -317,24 +426,29 @@ app.post('/api/storage/load', async (req, res) => {
       }
     });
 
-    const gistData = await gistResponse.json();
-    const fileContent = JSON.parse(gistData.files[gistFilename].content);
-    const decryptedData = JSON.parse(decrypt(fileContent.data));
+    const history = await historyResponse.json();
+
+    const auditLog = history.map(commit => ({
+      version: commit.version,
+      user: commit.user?.login || 'Unknown',
+      avatar: commit.user?.avatar_url,
+      committedAt: commit.committed_at,
+      changeStats: commit.change_status
+    }));
 
     res.json({
       success: true,
-      data: decryptedData,
-      metadata: {
-        updatedAt: fileContent.updatedAt,
-        updatedBy: fileContent.updatedBy,
-        gistUrl: gistData.html_url
-      }
+      history: auditLog,
+      gistUrl: targetGist.html_url
     });
+
   } catch (error) {
+    console.error('❌ Audit log error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
+// Fetch GitHub data (with token from session)
 async function fetchGitHub(url, sessionId) {
   const accessToken = getAccessToken(sessionId);
   const response = await fetch(url, {
@@ -344,23 +458,40 @@ async function fetchGitHub(url, sessionId) {
       'User-Agent': 'DevPulse-App'
     }
   });
-  if (!response.ok) throw new Error(`GitHub API error: ${response.status}`);
+  
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.status}`);
+  }
+  
   return response.json();
 }
 
+// Analyze repository
 app.post('/api/analyze', async (req, res) => {
   try {
     const { repoUrl, objectives, apiKey, sessionId, tasks } = req.body;
 
-    if (!sessionId) return res.status(401).json({ error: 'Auth required' });
-    if (!apiKey) return res.status(400).json({ error: 'Groq API key required' });
+    if (!sessionId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
-    const match = repoUrl.match(/github\.com\/([^\/]+)\/([^\/\?#]+)/);
-    if (!match) return res.status(400).json({ error: 'Invalid GitHub URL' });
+    if (!apiKey) {
+      return res.status(400).json({ 
+        error: 'Groq API key required' 
+      });
+    }
+
+    const urlPattern = /github\.com\/([^\/]+)\/([^\/\?#]+)/;
+    const match = repoUrl.match(urlPattern);
+    if (!match) {
+      return res.status(400).json({ error: 'Invalid GitHub URL' });
+    }
 
     const [, owner, repoName] = match;
     const cleanRepo = repoName.replace(/\.git$/, '');
     const session = tokenStore.get(sessionId);
+
+    console.log(`\n🔍 Analyzing ${owner}/${cleanRepo} (User: ${session.login})...`);
 
     const [repoData, contributors, commits, languages] = await Promise.all([
       fetchGitHub(`https://api.github.com/repos/${owner}/${cleanRepo}`, sessionId),
@@ -369,36 +500,20 @@ app.post('/api/analyze', async (req, res) => {
       fetchGitHub(`https://api.github.com/repos/${owner}/${cleanRepo}/languages`, sessionId)
     ]);
 
-    let taskContext = '';
-    if (tasks && tasks.length > 0) {
-      taskContext = `\n\nASSIGNED TASKS:\n${tasks.map((t, i) => `Task ${i + 1}: ${t.title}\nAssigned: ${t.assignedTo.join(', ')}\n`).join('\n')}`;
-    }
+    console.log('✓ GitHub data fetched');
+    console.log('🚀 Analyzing with Groq AI...');
 
-    const prompt = `Analyze this repository:\n\nRepo: ${repoData.name}\nContributors: ${contributors.map(c => c.login).join(', ')}\n${taskContext}\n\nReturn JSON with: contributors (name, overallScore, impact, strengths, areasForImprovement, taskPerformance), codeHealth, alignment, recommendations, teamDynamics`;
+    // AI Analysis
+    const aiAnalysis = await analyzeWithTasks(
+      repoData, 
+      contributors, 
+      commits, 
+      objectives, 
+      tasks || [],
+      apiKey
+    );
 
-    const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: 'Return only valid JSON.' },
-          { role: 'user', content: prompt }
-        ],
-        temperature: 0.7,
-        max_tokens: 4096
-      })
-    });
-
-    if (!groqRes.ok) throw new Error('Groq API error');
-    
-    const groqData = await groqRes.json();
-    const text = groqData.choices[0].message.content;
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    const aiAnalysis = JSON.parse(jsonMatch[0]);
+    console.log('✓ Complete!\n');
 
     res.json({
       success: true,
@@ -434,23 +549,165 @@ app.post('/api/analyze', async (req, res) => {
         analyzedAt: new Date().toISOString(),
         analyzedBy: session.login,
         objectives: objectives || null,
-        aiModel: 'Llama 3.3 70B',
+        aiModel: 'Llama 3.3 70B (Groq)',
         tasksAnalyzed: tasks?.length || 0
       }
     });
+
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error('❌ Error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
+// AI Analysis with Task Comparison
+async function analyzeWithTasks(repoData, contributors, commits, objectives, tasks, apiKey) {
+  let taskContext = '';
+  
+  if (tasks && tasks.length > 0) {
+    taskContext = `\n\nASSIGNED TASKS (Compare commits against these):
+${tasks.map((t, i) => `
+Task ${i + 1}: ${t.title}
+Description: ${t.description}
+Assigned to: ${t.assignedTo.join(', ')}
+Expected outcomes: ${t.expectedOutcomes?.join(', ') || 'Not specified'}
+Priority: ${t.priority}
+`).join('\n')}
+
+For each contributor assigned to tasks, analyze their commits and provide:
+1. Task alignment score (0-100)
+2. Code quality score (0-100)
+3. Timeliness score (0-100)
+4. Efficiency score (0-100)
+5. Detailed analysis of how commits match task requirements`;
+  }
+
+  const prompt = `Analyze this GitHub repository and provide detailed performance insights.
+
+Repository: ${repoData.name}
+Description: ${repoData.description || 'No description'}
+Language: ${repoData.language || 'Multiple'}
+Stars: ${repoData.stargazers_count}
+Objectives: ${objectives || 'General analysis'}
+${taskContext}
+
+Contributors:
+${contributors.slice(0, 10).map((c, i) => `${i + 1}. ${c.login} - ${c.contributions} commits`).join('\n')}
+
+Recent Commits:
+${commits.slice(0, 30).map((c, i) => {
+  const msg = c.commit.message.split('\n')[0];
+  const author = c.author?.login || c.commit.author.name;
+  return `${i + 1}. [${author}] "${msg}"`;
+}).join('\n')}
+
+Return ONLY valid JSON:
+{
+  "contributors": [
+    {
+      "name": "username",
+      "overallScore": 85,
+      "impact": "detailed analysis",
+      "strengths": ["s1", "s2", "s3"],
+      "areasForImprovement": ["a1", "a2"],
+      "taskPerformance": {
+        "assignedTasks": 2,
+        "completedTasks": 1,
+        "taskAlignmentScore": 90,
+        "codeQualityScore": 85,
+        "timelinessScore": 75,
+        "efficiencyScore": 88,
+        "taskSpecificAnalysis": "detailed analysis"
+      },
+      "commitMetrics": {
+        "frequency": "high",
+        "quality": "excellent",
+        "impact": "high"
+      }
+    }
+  ],
+  "alignment": {
+    "score": 80,
+    "analysis": "analysis text",
+    "keyAchievements": ["a1", "a2"]
+  },
+  "codeHealth": {
+    "score": 85,
+    "insights": "insights text",
+    "metrics": {
+      "commitFrequency": "high",
+      "codeQuality": "excellent",
+      "collaboration": "excellent"
+    }
+  },
+  "recommendations": ["rec1", "rec2", "rec3"],
+  "teamDynamics": {
+    "collaborationScore": 85,
+    "insights": "insights text"
+  }
+}`;
+
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        { 
+          role: 'system', 
+          content: 'You are an expert software engineering analyst. Always return valid JSON only, no markdown.' 
+        },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.7,
+      max_tokens: 4096
+    })
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error?.message || 'Groq API error');
+  }
+
+  const data = await response.json();
+  const text = data.choices[0].message.content;
+  
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('Invalid AI response');
+  
+  return JSON.parse(jsonMatch[0]);
+}
+
 app.get('/api/health', (req, res) => {
   res.json({ 
-    status: 'healthy',
-    service: 'DevPulse',
-    sessions: tokenStore.size
+    status: 'healthy', 
+    service: 'DevPulse - Secure Edition',
+    model: 'Llama 3.3 70B (Groq)',
+    features: [
+      'GitHub OAuth',
+      'Private Repos',
+      'Shared Task Storage (Gists)',
+      'Encrypted Tokens (Server-side)',
+      'Audit Logs',
+      'Multi-Repo (max 5)',
+      'No Traditional Database'
+    ],
+    security: {
+      tokenStorage: 'Server-side encrypted',
+      dataStorage: 'GitHub Gists (encrypted)',
+      auditLogs: 'Gist history',
+      sessions: tokenStore.size
+    }
   });
 });
 
+// Cleanup expired sessions every 5 minutes
 setInterval(() => {
   const now = Date.now();
   let cleaned = 0;
@@ -460,15 +717,26 @@ setInterval(() => {
       cleaned++;
     }
   }
-  if (cleaned > 0) console.log(`🧹 Cleaned ${cleaned} sessions`);
+  if (cleaned > 0) {
+    console.log(`🧹 Cleaned ${cleaned} expired sessions`);
+  }
 }, 5 * 60 * 1000);
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 DevPulse v2.0`);
+  console.log('\n🚀 DevPulse - Secure Edition v2.0');
   console.log(`📡 Server: http://localhost:${PORT}`);
-  console.log(`🔐 OAuth: ${GITHUB_CLIENT_ID ? '✓' : '❌'}`);
-  console.log(`🔑 Encryption: ${ENCRYPTION_KEY ? '✓' : '❌'}`);
-  console.log(`\n✅ Ready!\n`);
+  console.log(`🔐 GitHub OAuth: ${GITHUB_CLIENT_ID ? '✓ Configured' : '❌ Not configured'}`);
+  console.log(`🔑 Encryption: ${ENCRYPTION_KEY ? '✓ Enabled' : '❌ Disabled'}`);
+  console.log(`🤖 AI Model: Llama 3.3 70B (Groq)`);
+  console.log(`\n🛡️  Security Features:`);
+  console.log(`   ✓ Server-side encrypted token storage`);
+  console.log(`   ✓ Shared data via GitHub Gists (encrypted)`);
+  console.log(`   ✓ Audit logs via Gist history`);
+  console.log(`   ✓ Session-based auth (24h expiry)`);
+  console.log(`   ✓ No traditional database`);
+  console.log(`\n🌐 Allowed CORS Origins:`);
+  allowedOrigins.forEach(origin => console.log(`   ✓ ${origin}`));
+  console.log(`\n✅ Ready to accept connections!\n`);
 });
 
 module.exports = app;

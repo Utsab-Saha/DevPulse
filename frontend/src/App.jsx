@@ -1,13 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { LogOut, Plus, Trash2, Edit, X, Target, AlertTriangle, TrendingUp, Loader2, Lock, Clock, RefreshCw, Save, BarChart3, Users, FileText, CheckCircle2, Circle, AlertCircle } from 'lucide-react';
 
-// Configuration - Update these values directly
+// Configuration - Using Vercel serverless functions
 const CONFIG = {
-  API_URL: process.env.REACT_APP_API_URL,
-  GITHUB_CLIENT_ID: process.env.REACT_APP_GITHUB_CLIENT_ID,
+  API_URL: process.env.REACT_APP_API_URL || '', // Empty for same-origin API routes
+  GITHUB_CLIENT_ID: process.env.REACT_APP_GITHUB_CLIENT_ID || 'Ov23linVs5BQek63QtJ4',
   MAX_REPOS: 5
 };
-
 
 const SecureSession = {
   set: (sessionId, user) => {
@@ -78,9 +77,9 @@ export default function App() {
     setAuthLoading(true);
     setError('');
     try {
-      console.log('Sending auth request to:', `${CONFIG.API_URL}/api/auth/github`);
+      console.log('Sending auth request to serverless function...');
       
-      const res = await fetch(`${CONFIG.API_URL}/api/auth/github`, {
+      const res = await fetch(`/api/auth/github`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -111,7 +110,7 @@ export default function App() {
       }
     } catch (e) {
       console.error('Authentication error:', e);
-      setError(`Authentication failed: ${e.message}. Please check if the backend is running at ${CONFIG.API_URL}`);
+      setError(`Authentication failed: ${e.message}`);
     } finally {
       setAuthLoading(false);
     }
@@ -126,7 +125,7 @@ export default function App() {
 
   const logout = async () => {
     try {
-      await fetch(`${CONFIG.API_URL}/api/auth/logout`, {
+      await fetch(`/api/auth/logout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId })
@@ -171,7 +170,7 @@ export default function App() {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(`${CONFIG.API_URL}/api/repo/check-access`, {
+      const res = await fetch(`/api/repo/check-access`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ owner, repo, sessionId, username: user.login })
@@ -213,7 +212,7 @@ export default function App() {
   const loadTasks = async () => {
     setSyncing(true);
     try {
-      const res = await fetch(`${CONFIG.API_URL}/api/storage/load`, {
+      const res = await fetch(`/api/storage/load`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -239,7 +238,7 @@ export default function App() {
   const saveTasks = async (updated) => {
     setSyncing(true);
     try {
-      await fetch(`${CONFIG.API_URL}/api/storage/save`, {
+      await fetch(`/api/storage/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -295,7 +294,7 @@ export default function App() {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(`${CONFIG.API_URL}/api/analyze`, {
+      const res = await fetch(`/api/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -376,7 +375,7 @@ export default function App() {
               <Lock className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
               <div>
                 <p className="font-semibold text-gray-900 text-sm">Secure Data Encryption</p>
-                <p className="text-gray-600 text-xs mt-0.5">End-to-end encrypted storage</p>
+                <p className="text-gray-600 text-xs mt-0.5">End-to-end encrypted storage via GitHub Gists</p>
               </div>
             </div>
             <div className="flex items-start gap-3">
@@ -415,9 +414,9 @@ export default function App() {
           </p>
           
           <div className="mt-6 pt-6 border-t border-gray-200">
-            <p className="text-xs text-gray-500 text-center mb-2">Backend API:</p>
+            <p className="text-xs text-gray-500 text-center mb-2">Serverless Backend:</p>
             <p className="text-xs font-mono text-gray-700 text-center bg-gray-100 py-2 px-3 rounded-lg">
-              {CONFIG.API_URL}
+              Vercel Functions ⚡
             </p>
           </div>
         </div>
@@ -639,7 +638,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TASKS TAB */}
+        {/* TASKS TAB - Same as before */}
         {tab === 'tasks' && activeRepo && (
           <div className="space-y-6">
             <div className="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm">
@@ -801,7 +800,7 @@ export default function App() {
           </div>
         )}
 
-        {/* RESULTS TAB */}
+        {/* RESULTS TAB - Same as before */}
         {tab === 'results' && analysis && (
           <div className="space-y-6">
             <div className="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm">
