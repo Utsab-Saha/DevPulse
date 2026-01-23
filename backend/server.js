@@ -713,7 +713,7 @@ app.get('/api/health', (req, res) => {
 
 // All other routes serve the React app
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
+  res.sendFile(path.join(__dirname, 'frontend/public', 'index.html'));
 });
 
 // ============================================================================
